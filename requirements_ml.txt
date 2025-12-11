@@ -1,0 +1,7 @@
+tensorflow>=2.13.0
+keras>=2.13.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+scikit-learn>=1.3.0
+stable-baselines3[extra]>=2.3.0
+gymnasium>=0.29.0
