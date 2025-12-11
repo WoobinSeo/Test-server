@@ -81,7 +81,7 @@ def preprocess_stock_daily(
     stock_code: str,
     stock_name: str,
     threshold: float = 0.01,
-    output_dir: str = "data/daily_classification",
+    output_dir: str = "data/preprocessed",
 ):
     print(f"\n{'='*60}")
     print(f"{stock_name} ({stock_code}) 일봉 분류 전처리")
@@ -164,7 +164,7 @@ def preprocess_stock_daily(
             else:
                 idx_slice = slice(val_end, val_end + len(df_split))
             df_split["datetime"] = df["datetime"].iloc[idx_slice].values
-        fname = out_dir / f"{stock_name}_{split_name}_daily_class.csv"
+        fname = out_dir / f"{stock_name}_{split_name}.csv"
         df_split.to_csv(fname, index=False, encoding="utf-8-sig")
         print(f"  - {fname}")
 
@@ -173,7 +173,7 @@ def preprocess_stock_daily(
     save_split(X_test_scaled, y_test, "test")
 
     # 스케일러 저장
-    scaler_path = out_dir / f"{stock_name}_daily_scaler.pkl"
+    scaler_path = out_dir / f"{stock_name}_scaler.pkl"
     with open(scaler_path, "wb") as f:
         pickle.dump({"scaler": scaler, "features": feature_cols}, f)
     print(f"  - 스케일러 저장: {scaler_path}")
