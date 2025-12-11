@@ -165,6 +165,11 @@ class KISBroker:
             "ORD_UNPR": str(price),
         }
 
+        # --- [1] KIS로 보내는 요청 원본을 출력 ---
+        print(f"[DEBUG KIS] URL: {url}")
+        print(f"[DEBUG KIS] Request Body: {body}")
+        # ----------------------------------------
+
         resp = requests.post(url, headers=headers, data=json.dumps(body))
         try:
             js = resp.json()
@@ -172,6 +177,7 @@ class KISBroker:
             js = {"raw": resp.text}
 
         if resp.status_code != 200 or js.get("rt_cd") not in (None, "0"):
+            print(f"[ERROR KIS RESPONSE] Status: {resp.status_code}, Full Response: {js}")
             raise RuntimeError(f"KIS 주문 실패: status={resp.status_code}, body={js}")
 
         return js
