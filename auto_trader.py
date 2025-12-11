@@ -40,10 +40,10 @@ class StockConfig:
 
 
 STOCKS: List[StockConfig] = [
-    StockConfig(name="삼성전자", code="005930", model_path="rl_models/sac_삼성전자_final"),
+    StockConfig(name="삼성전자", code="005930", model_path="rl_models/sac_삼성전자_best/best_model"),
     StockConfig(name="네이버", code="035420", model_path="rl_models/sac_네이버_best/best_model"),
+    # 현대차는 final 모델이 더 성능이 좋아서 final 사용
     StockConfig(name="현대차", code="005380", model_path="rl_models/sac_현대차_final"),
-    # 각 final 과 best 중 더 성능 좋은 모델 채택
 ]
 
 
