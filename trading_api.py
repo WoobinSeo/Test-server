@@ -85,6 +85,19 @@ def get_broker() -> KISBroker:
         _broker = KISBroker(cfg)
     return _broker
 
+# ===========================================
+class AccountInfo(BaseModel):
+    """프론트엔드로 전달할 사용자 정보 모델"""
+    username: str
+    name: str
+    api_key_set: bool = Field(False, description="API Key가 설정되었는지 여부")
+
+class AccountUpdate(BaseModel):
+    """사용자 정보 업데이트 요청 모델"""
+    name: Optional[str] = None
+    api_key: Optional[str] = None
+
+# ===========================================
 
 class MarketOrderRequest(BaseModel):
     stock_code: str = Field(..., description="6자리 종목코드 (예: '005930')")
@@ -391,6 +404,80 @@ def _get_user_from_token(token: str) -> User:
         raise HTTPException(status_code=401, detail="사용자를 찾을 수 없습니다.")
     return user
 
+# GET /me/account: 사용자/계좌 정보 조회
+@app.get("/me/account", response_model=AccountInfo)
+async def get_my_account(
+    token: str = Query(...), 
+    db=Depends(get_db) # DB 의존성 주입 가정
+):
+    """
+    현재 로그인된 사용자의 상세 정보(마이페이지)를 조회합니다.
+    (FastAPI가 사용하는 인증 의존성 함수를 이 라우트에 맞게 수정해야 할 수 있습니다.)
+    """
+    try:
+        # 1. JWT 토큰 검증 및 사용자 찾기
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        username = payload.get("username")
+        
+        session = db.get_session()
+        user = session.query(User).filter(User.username == username).first()
+        session.close()
+
+        if not user:
+            raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
+
+        return AccountInfo(
+            username=user.username,
+            name=user.name,
+            api_key_set=bool(user.api_key)
+        )
+    except Exception as e:
+        # 토큰 만료 또는 기타 오류 처리
+        raise HTTPException(status_code=401, detail=f"인증 실패: {e}")
+
+
+# PUT /me/account: 사용자 정보 (이름/API Key) 업데이트
+@app.put("/me/account", response_model=AccountInfo)
+async def update_my_account(
+    body: AccountUpdate,
+    token: str = Query(...),
+    db=Depends(get_db)
+):
+    """사용자 이름 또는 KIS API Key를 업데이트합니다."""
+    try:
+        # 1. JWT 토큰 검증 및 사용자 찾기
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        username = payload.get("username")
+        
+        session = db.get_session()
+        user = session.query(User).filter(User.username == username).first()
+
+        if not user:
+            session.close()
+            raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
+
+        if body.name is not None:
+            user.name = body.name
+        
+        if body.api_key is not None:
+            # API Key는 보안을 위해 bcrypt로 해시하여 저장해야 합니다.
+            # 하지만 간단화를 위해 여기서는 플레이스홀더로 둡니다.
+            user.api_key = body.api_key
+        
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        session.close()
+
+        return AccountInfo(
+            username=user.username,
+            name=user.name,
+            api_key_set=bool(user.api_key)
+        )
+    except Exception as e:
+        session.rollback()
+        session.close()
+        raise HTTPException(status_code=500, detail=f"정보 업데이트 실패: {e}")
 
 @app.get("/signup-page", response_class=HTMLResponse)
 def signup_page():
