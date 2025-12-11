@@ -383,20 +383,7 @@ def _get_user_from_token(token: str) -> User:
     db = get_db()
     session = db.get_session()
     try:
-        # [디버깅 로그 추가] 서버가 보고 있는 세상 출력
-        print(f"============== [DEBUG] 사용자 조회 시작 ==============")
-        print(f"1. 토큰에서 읽은 ID: '{username}'")
-        print(f"2. 서버가 연결된 DB 이름: {db.database}")  # 범인 색출용
-        
-        # 실제 DB에 있는 모든 유저 긁어오기 (제대로 연결됐는지 확인)
-        all_users = session.query(User).all()
-        print(f"3. 현재 DB에 저장된 총 유저 수: {len(all_users)}명")
-        found_users = [u.username for u in all_users]
-        print(f"4. DB 유저 목록: {found_users}")
-
         user = session.query(User).filter(User.username == username).first()
-        print(f"5. 조회 결과: {user}")
-        print(f"====================================================")
     finally:
         session.close()
 
