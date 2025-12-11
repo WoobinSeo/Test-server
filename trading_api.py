@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional, List
 
 import bcrypt
-from fastapi import FastAPI, HTTPException, Query, Header
+from fastapi import FastAPI, HTTPException, Query, Header, Depends
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from jose import jwt
