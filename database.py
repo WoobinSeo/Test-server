@@ -237,5 +237,15 @@ class DatabaseManager:
             self.engine.dispose()
             print("✅ 데이터베이스 연결 종료")
 
+class UserBrokerConfig(Base):
+    """사용자별 KIS 계좌 설정 (계좌번호, 상품코드)"""
 
+    __tablename__ = "user_broker_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    account_no = Column(String(32), nullable=False)
+    account_code = Column(String(4), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
