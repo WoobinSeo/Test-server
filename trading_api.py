@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List
@@ -34,6 +35,7 @@ from database import (
     StockPrice,
     StockPriceProcessed,
     User,
+    UserBrokerConfig,
 )
 
 
@@ -103,7 +105,14 @@ DEFAULT_MAX_WEIGHT_PCT = float(os.getenv("RISK_MAX_WEIGHT_PCT", "0.5"))  # 0~1
 DEFAULT_MAX_DAILY_BUY_AMOUNT = float(os.getenv("RISK_MAX_DAILY_BUY_AMOUNT", "0"))  # 0이면 비활성
 
 
-def check_risk_limit(broker: KISBroker, stock_code: str, side: str, quantity: int):
+def check_risk_limit(
+    broker: KISBroker,
+    stock_code: str,
+    side: str,
+    quantity: int,
+    account_no: Optional[str] = None,
+    account_code: Optional[str] = None,
+):
     """
     간단한 리스크 체크:
       - 매수:
@@ -112,7 +121,10 @@ def check_risk_limit(broker: KISBroker, stock_code: str, side: str, quantity: in
       - 매도:
           * 보유수량/매도가능수량 이상으로 팔 수 없음
     """
-    bal = broker.get_balance()
+    bal = broker.get_balance(
+        account_no_override=account_no,
+        account_code_override=account_code,
+    )
     raw = bal if isinstance(bal, dict) else {}
     holdings = raw.get("output1") or []
     summary_list = raw.get("output2") or []
@@ -329,6 +341,55 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     token: str
     name: str
+
+
+class BrokerConfigIn(BaseModel):
+    """로그인한 사용자의 KIS 계좌 설정 입력용"""
+
+    account_no: str = Field(..., description="KIS 계좌번호 (앞 8자리 또는 전체 문자열)")
+    account_code: str = Field(..., description="상품코드 (보통 2자리, 예: '01')")
+
+
+class BrokerConfigOut(BaseModel):
+    """사용자에게 보여줄 계좌 설정 정보 (마스킹 포함)"""
+
+    has_config: bool
+    account_no_masked: Optional[str] = None
+    account_code: Optional[str] = None
+
+
+def _mask_account_no(account_no: str) -> str:
+    """계좌번호 일부만 보여주기 위한 마스킹 유틸."""
+    s = (account_no or "").strip()
+    if len(s) <= 4:
+        return "*" * len(s)
+    if len(s) <= 8:
+        return s[:2] + "*" * (len(s) - 4) + s[-2:]
+    # 기본: 앞 4자리 + **** + 끝 2자리
+    return s[:4] + "*" * max(2, len(s) - 6) + s[-2:]
+
+
+def _get_user_from_token(token: str) -> User:
+    """JWT 토큰으로부터 User 객체를 조회."""
+    try:
+        data = jwt.decode(token, SECRET_KEY)
+    except Exception:
+        raise HTTPException(status_code=401, detail="토큰 만료 또는 오류")
+
+    username = data.get("username")
+    if not username:
+        raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다.")
+
+    db = get_db()
+    session = db.get_session()
+    try:
+        user = session.query(User).filter(User.username == username).first()
+    finally:
+        session.close()
+
+    if not user:
+        raise HTTPException(status_code=401, detail="사용자를 찾을 수 없습니다.")
+    return user
 
 
 @app.get("/signup-page", response_class=HTMLResponse)
@@ -1368,6 +1429,84 @@ def me(token: str):
         raise HTTPException(status_code=401, detail="토큰 만료 또는 오류")
 
 
+@app.get("/me/account", response_model=BrokerConfigOut)
+def get_my_broker_config(token: str):
+    """
+    로그인한 사용자의 KIS 계좌 설정 조회.
+
+    - 쿼리 파라미터 ?token=... 으로 토큰 전달
+    """
+    user = _get_user_from_token(token)
+
+    db = get_db()
+    session = db.get_session()
+    try:
+        cfg = (
+            session.query(UserBrokerConfig)
+            .filter(UserBrokerConfig.user_id == user.id)
+            .first()
+        )
+    finally:
+        session.close()
+
+    if not cfg:
+        return BrokerConfigOut(has_config=False, account_no_masked=None, account_code=None)
+
+    return BrokerConfigOut(
+        has_config=True,
+        account_no_masked=_mask_account_no(cfg.account_no),
+        account_code=cfg.account_code,
+    )
+
+
+@app.put("/me/account", response_model=BrokerConfigOut)
+def upsert_my_broker_config(token: str, body: BrokerConfigIn):
+    """
+    로그인한 사용자의 KIS 계좌 설정 생성/수정.
+
+    - 쿼리 파라미터 ?token=... 으로 토큰 전달
+    """
+    user = _get_user_from_token(token)
+
+    account_no = body.account_no.strip()
+    account_code = body.account_code.strip()
+    if not account_no or not account_code:
+        raise HTTPException(status_code=400, detail="계좌번호와 상품코드는 필수입니다.")
+
+    db = get_db()
+    session = db.get_session()
+    try:
+        cfg = (
+            session.query(UserBrokerConfig)
+            .filter(UserBrokerConfig.user_id == user.id)
+            .first()
+        )
+        if cfg is None:
+            cfg = UserBrokerConfig(
+                user_id=user.id,
+                account_no=account_no,
+                account_code=account_code,
+            )
+        else:
+            cfg.account_no = account_no
+            cfg.account_code = account_code
+
+        session.add(cfg)
+        session.commit()
+        session.refresh(cfg)
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"계좌 설정 저장 실패: {e}")
+    finally:
+        session.close()
+
+    return BrokerConfigOut(
+        has_config=True,
+        account_no_masked=_mask_account_no(cfg.account_no),
+        account_code=cfg.account_code,
+    )
+
+
 # ---------------------------------------------------------------------------
 # React 프론트엔드 호환용 간단 계정/트레이드/지표 API
 #   - baseURL: http://localhost:8000
@@ -1686,8 +1825,9 @@ def api_trade_auto(payload: dict):
         raise HTTPException(status_code=500, detail=f"auto_trader 스크립트를 찾을 수 없습니다: {script_path}")
 
     try:
+        # sys.executable을 사용하여 현재 FastAPI가 실행 중인 파이썬(대부분 venv)을 그대로 사용
         proc = subprocess.run(
-            ["python", str(script_path)],
+            [sys.executable, str(script_path)],
             capture_output=True,
             text=True,
             timeout=300,
@@ -2024,6 +2164,31 @@ def dashboard():
 
     <section class="card">
       <h2>
+        내 KIS 계좌 설정
+      </h2>
+      <div class="subtitle">로그인한 사용자별로 사용할 KIS 계좌번호를 저장합니다. (서버에는 암호화되지 않은 채로만 저장되므로 데모/내부용으로 사용하세요.)</div>
+      <div class="grid">
+        <div>
+          <label for="account-no">계좌번호</label>
+          <input id="account-no" placeholder="예: 12345678" />
+        </div>
+        <div>
+          <label for="account-code">상품코드</label>
+          <input id="account-code" placeholder="예: 01" />
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="btn-save-account" style="width:100%;">계좌 설정 저장</button>
+        </div>
+      </div>
+      <div class="small" style="margin-top:8px;">
+        현재 저장된 계좌: <span id="account-current">없음</span>
+      </div>
+      <div id="account-status" class="status"></div>
+    </section>
+
+    <section class="card">
+      <h2>
         시장가 주문 테스트
         <span class="tag">POST /orders/market</span>
       </h2>
@@ -2116,6 +2281,14 @@ def dashboard():
   </main>
 
   <script>
+    function getToken() {
+      try {
+        return window.localStorage.getItem("stuckai_token");
+      } catch (e) {
+        return null;
+      }
+    }
+
     // --- 간단 로그인 체크: 토큰 없거나 /me 실패 시 로그인 페이지로 이동 ---
     (async function guardDashboard() {
       try {
@@ -2179,6 +2352,82 @@ def dashboard():
     const riskApiKey = document.getElementById("risk-api-key");
     const riskStatus = document.getElementById("risk-status");
     const riskTable = document.getElementById("risk-table");
+    const accountNoInput = document.getElementById("account-no");
+    const accountCodeInput = document.getElementById("account-code");
+    const accountCurrent = document.getElementById("account-current");
+    const accountStatus = document.getElementById("account-status");
+    const btnSaveAccount = document.getElementById("btn-save-account");
+
+    async function loadMyAccountConfig() {
+      const token = getToken();
+      if (!token) {
+        accountCurrent.textContent = "로그인 정보 없음";
+        return;
+      }
+      accountStatus.textContent = "계좌 설정 조회 중...";
+      accountStatus.className = "status";
+      try {
+        const res = await fetchJson("/me/account?token=" + encodeURIComponent(token));
+        if (!res.ok) {
+          accountCurrent.textContent = "조회 실패";
+          accountStatus.textContent = res.json && res.json.detail ? res.json.detail : "계좌 설정 조회 실패";
+          accountStatus.className = "status err";
+          return;
+        }
+        const data = res.json;
+        if (data.has_config) {
+          accountCurrent.textContent = (data.account_no_masked || "설정됨") + " / " + (data.account_code || "");
+        } else {
+          accountCurrent.textContent = "없음";
+        }
+        accountStatus.textContent = "";
+      } catch (e) {
+        accountCurrent.textContent = "오류";
+        accountStatus.textContent = "에러: " + e;
+        accountStatus.className = "status err";
+      }
+    }
+
+    btnSaveAccount.addEventListener("click", async () => {
+      const token = getToken();
+      if (!token) {
+        alert("로그인 정보가 없습니다. 다시 로그인 해주세요.");
+        window.location.href = "/login-page";
+        return;
+      }
+      const no = (accountNoInput.value || "").trim();
+      const code = (accountCodeInput.value || "").trim();
+      if (!no || !code) {
+        accountStatus.textContent = "계좌번호와 상품코드를 모두 입력하세요.";
+        accountStatus.className = "status err";
+        return;
+      }
+
+      btnSaveAccount.disabled = true;
+      accountStatus.textContent = "저장 중...";
+      accountStatus.className = "status";
+      try {
+        const res = await fetchJson("/me/account?token=" + encodeURIComponent(token), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ account_no: no, account_code: code })
+        });
+        if (!res.ok) {
+          accountStatus.textContent = "저장 실패: " + (res.json && res.json.detail ? res.json.detail : "오류");
+          accountStatus.className = "status err";
+          return;
+        }
+        const data = res.json;
+        accountCurrent.textContent = (data.account_no_masked || "설정됨") + " / " + (data.account_code || "");
+        accountStatus.textContent = "저장 완료";
+        accountStatus.className = "status ok";
+      } catch (e) {
+        accountStatus.textContent = "에러: " + e;
+        accountStatus.className = "status err";
+      } finally {
+        btnSaveAccount.disabled = false;
+      }
+    });
 
     function renderBalanceNice(raw) {
       balanceTable.innerHTML = "";
@@ -2298,7 +2547,12 @@ def dashboard():
       balanceTable.innerHTML = "";
       balanceSummary.textContent = "";
       try {
-        const res = await fetchJson("/accounts/balance");
+        const token = getToken();
+        let url = "/accounts/balance";
+        if (token) {
+          url += "?token=" + encodeURIComponent(token);
+        }
+        const res = await fetchJson(url);
         const raw = res.json && res.json.raw ? res.json.raw : res.json;
         balanceOut.textContent = JSON.stringify(raw, null, 2);
         if (res.ok) {
@@ -2528,7 +2782,12 @@ def dashboard():
       orderOut.textContent = "";
 
       try {
-        const res = await fetchJson("/orders/market", {
+        const token = getToken();
+        let url = "/orders/market";
+        if (token) {
+          url += "?token=" + encodeURIComponent(token);
+        }
+        const res = await fetchJson(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ stock_code: code, quantity: qty, side })
@@ -2548,6 +2807,9 @@ def dashboard():
         btnOrder.disabled = false;
       }
     });
+
+    // 초기 계좌 설정 로드
+    loadMyAccountConfig();
   </script>
 </body>
 </html>
@@ -2558,36 +2820,82 @@ def dashboard():
 def place_market_order(
     req: MarketOrderRequest,
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    token: Optional[str] = Query(
+        default=None, description="로그인 토큰 (사용자별 계좌로 주문 시 사용)"
+    ),
 ):
     """
     단순 시장가 주문 엔드포인트.
 
-    강화학습/전략 엔진은:
-      1) 어떤 종목을 얼마만큼 매수/매도할지 결정하고
-      2) 이 엔드포인트에 POST를 보내 실제 주문을 실행한다.
+    두 가지 모드로 동작:
+      1) 웹 대시보드 / 사용자 모드: token 쿼리 파라미터로 로그인 사용자를 식별하고,
+         해당 사용자의 KIS 계좌 설정(UserBrokerConfig)을 사용해 주문.
+      2) 시스템/전략 엔진 모드: token 없이 API_KEY 헤더(X-API-Key)를 사용하는 기존 방식.
 
     주문 결과는 `trade_orders` 테이블에 로그로 저장된다.
     """
-    # 간단한 API 키 인증 (옵션)
-    expected_key = os.getenv("API_KEY")
-    if expected_key and x_api_key != expected_key:
-        raise HTTPException(status_code=401, detail="유효하지 않은 API Key 입니다.")
-
     broker = get_broker()
     db = get_db()
+
+    account_no_override: Optional[str] = None
+    account_code_override: Optional[str] = None
+
+    if token:
+        # 사용자별 계좌 기반 주문
+        user = _get_user_from_token(token)
+        session = db.get_session()
+        try:
+            cfg = (
+                session.query(UserBrokerConfig)
+                .filter(UserBrokerConfig.user_id == user.id)
+                .first()
+            )
+        finally:
+            session.close()
+
+        if not cfg:
+            raise HTTPException(
+                status_code=400,
+                detail="주문 전 먼저 '내 KIS 계좌 설정'에서 계좌번호를 등록해주세요.",
+            )
+
+        account_no_override = cfg.account_no
+        account_code_override = cfg.account_code
+    else:
+        # 간단한 API 키 인증 (옵션, 기존 동작 유지)
+        expected_key = os.getenv("API_KEY")
+        if expected_key and x_api_key != expected_key:
+            raise HTTPException(status_code=401, detail="유효하지 않은 API Key 입니다.")
 
     side = req.side.upper()
     if side not in ("BUY", "SELL"):
         raise HTTPException(status_code=400, detail="side 는 'BUY' 또는 'SELL' 이어야 합니다.")
 
-    # 리스크 한도 체크
-    check_risk_limit(broker, stock_code=req.stock_code, side=side, quantity=req.quantity)
+    # 리스크 한도 체크 (사용자별 계좌 또는 기본 계좌 기준)
+    check_risk_limit(
+        broker,
+        stock_code=req.stock_code,
+        side=side,
+        quantity=req.quantity,
+        account_no=account_no_override,
+        account_code=account_code_override,
+    )
 
     try:
         if side == "BUY":
-            res = broker.buy_market(stock_code=req.stock_code, quantity=req.quantity)
+            res = broker.buy_market(
+                stock_code=req.stock_code,
+                quantity=req.quantity,
+                account_no_override=account_no_override,
+                account_code_override=account_code_override,
+            )
         else:
-            res = broker.sell_market(stock_code=req.stock_code, quantity=req.quantity)
+            res = broker.sell_market(
+                stock_code=req.stock_code,
+                quantity=req.quantity,
+                account_no_override=account_no_override,
+                account_code_override=account_code_override,
+            )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"KIS 주문 실패: {e}")
 
@@ -2626,7 +2934,11 @@ def place_market_order(
 
 
 @app.get("/accounts/balance", response_model=BalanceResponse)
-def get_account_balance():
+def get_account_balance(
+    token: Optional[str] = Query(
+        default=None, description="로그인 토큰 (사용자별 계좌로 조회할 때 사용)"
+    ),
+):
     """
     KIS 계좌 잔고/보유 종목 조회.
 
@@ -2634,8 +2946,37 @@ def get_account_balance():
     """
     broker = get_broker()
     db = get_db()
+
+    account_no_override: Optional[str] = None
+    account_code_override: Optional[str] = None
+
+    # 토큰이 있으면 사용자별 계좌 설정을 우선 사용
+    if token:
+        user = _get_user_from_token(token)
+        session = db.get_session()
+        try:
+            cfg = (
+                session.query(UserBrokerConfig)
+                .filter(UserBrokerConfig.user_id == user.id)
+                .first()
+            )
+        finally:
+            session.close()
+
+        if not cfg:
+            raise HTTPException(
+                status_code=400,
+                detail="계좌 조회 전 먼저 '내 KIS 계좌 설정'에서 계좌번호를 등록해주세요.",
+            )
+
+        account_no_override = cfg.account_no
+        account_code_override = cfg.account_code
+
     try:
-        bal = broker.get_balance()
+        bal = broker.get_balance(
+            account_no_override=account_no_override,
+            account_code_override=account_code_override,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"KIS 잔고 조회 실패: {e}")
 
