@@ -38,6 +38,9 @@ from database import (
     UserBrokerConfig,
 )
 
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
 
 app = FastAPI(title="StuckAI Trading API", version="0.1.0")
 
@@ -3294,3 +3297,9 @@ def upsert_risk_setting(
         created_at=setting.created_at,
         updated_at=setting.updated_at,
     )
+
+# 1. 'dist' 폴더가 실제로 있는지 확인 후 마운트 (에러 방지)
+if os.path.exists("dist"):
+    app.mount("/", StaticFiles(directory="dist", html=True), name="static")
+else:
+    print("⚠️ 경고: 'dist' 폴더를 찾을 수 없습니다. 웹 프론트엔드가 실행되지 않습니다.")
