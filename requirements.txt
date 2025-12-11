@@ -1,0 +1,12 @@
+requests==2.31.0
+pandas==2.1.4
+numpy==1.26.2
+python-dotenv==1.0.0
+pyyaml==6.0.1
+psycopg2-binary==2.9.11
+sqlalchemy==2.0.44
+yfinance==0.2.51
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+bcrypt==4.2.1
+python-jose==3.3.0
